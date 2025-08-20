@@ -28,6 +28,7 @@
 #include <index/coinstatsindex.h>
 #include <index/locationsindex.h>
 #include <index/txindex.h>
+#include <index/bip352.h>
 #include <init/common.h>
 #include <interfaces/chain.h>
 #include <interfaces/init.h>
@@ -354,6 +355,8 @@ void Shutdown(NodeContext& node)
     if (g_txindex) g_txindex.reset();
     if (g_coin_stats_index) g_coin_stats_index.reset();
     if (g_locations_index) g_locations_index.reset();
+    if (g_bip352_index) g_bip352_index.reset();
+    if (g_bip352_ct_index) g_bip352_ct_index.reset();
     DestroyAllBlockFilterIndexes();
     node.indexes.clear(); // all instances are nullptr now
 
@@ -492,7 +495,6 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-allowignoredconf", strprintf("For backwards compatibility, treat an unused %s file in the datadir as a warning, not an error.", BITCOIN_CONF_FILENAME), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-loadblock=<file>", "Imports blocks from external file on startup", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-maxmempool=<n>", strprintf("Keep the transaction memory pool below <n> megabytes (default: %u)", DEFAULT_MAX_MEMPOOL_SIZE_MB), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
-    argsman.AddArg("-maxorphantx=<n>", strprintf("Keep at most <n> unconnectable transactions in memory (default: %u)", DEFAULT_MAX_ORPHAN_TRANSACTIONS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-mempoolexpiry=<n>", strprintf("Do not keep transactions in the mempool longer than <n> hours (default: %u)", DEFAULT_MEMPOOL_EXPIRY_HOURS), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-minimumchainwork=<hex>", strprintf("Minimum work assumed to exist on a valid chain in hex (default: %s, testnet3: %s, testnet4: %s, signet: %s)", defaultChainParams->GetConsensus().nMinimumChainWork.GetHex(), testnetChainParams->GetConsensus().nMinimumChainWork.GetHex(), testnet4ChainParams->GetConsensus().nMinimumChainWork.GetHex(), signetChainParams->GetConsensus().nMinimumChainWork.GetHex()), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::OPTIONS);
     argsman.AddArg("-par=<n>", strprintf("Set the number of script verification threads (0 = auto, up to %d, <0 = leave that many cores free, default: %d)",
@@ -515,6 +517,12 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-shutdownnotify=<cmd>", "Execute command immediately before beginning shutdown. The need for shutdown may be urgent, so be careful not to delay it long (if the command doesn't require interaction with the server, consider having it fork into the background).", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
 #endif
     argsman.AddArg("-txindex", strprintf("Maintain a full transaction index, used by the getrawtransaction rpc call (default: %u)", DEFAULT_TXINDEX), ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-bip352index",
+                 strprintf("Maintain an index of BIP352 v0 tweaked public keys. (default: %s)", DEFAULT_BIP352_INDEX),
+                 ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    argsman.AddArg("-bip352ctindex",
+                 strprintf("Maintain an index of BIP352 v0 tweaked public keys with transaction cut-through. (default: %s)", DEFAULT_BIP352_CT_INDEX),
+                 ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     argsman.AddArg("-blockfilterindex=<type>",
                  strprintf("Maintain an index of compact filters by block (default: %s, values: %s).", DEFAULT_BLOCKFILTERINDEX, ListBlockFilterTypes()) +
                  " If <type> is not supplied or if <type> = 1, indexes for all known types are enabled.",
@@ -964,6 +972,10 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (args.GetIntArg("-prune", 0)) {
         if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX))
             return InitError(_("Prune mode is incompatible with -txindex."));
+        if (args.GetBoolArg("-bip352index", DEFAULT_BIP352_INDEX))
+            return InitError(_("Prune mode is incompatible with -bip352index."));
+        if (args.GetBoolArg("-bip352ctindex", DEFAULT_BIP352_CT_INDEX))
+            return InitError(_("Prune mode is incompatible with -bip352ctindex."));
         if (args.GetBoolArg("-reindex-chainstate", false)) {
             return InitError(_("Prune mode is incompatible with -reindex-chainstate. Use full -reindex instead."));
         }
@@ -1055,7 +1067,9 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     if (!g_wallet_init_interface.ParameterInteraction()) return false;
 
     // Option to startup with mocktime set (used for regression testing):
-    SetMockTime(args.GetIntArg("-mocktime", 0)); // SetMockTime(0) is a no-op
+    if (const auto mocktime{args.GetIntArg("-mocktime")}) {
+        SetMockTime(std::chrono::seconds{*mocktime});
+    }
 
     if (args.GetBoolArg("-peerbloomfilters", DEFAULT_PEERBLOOMFILTERS))
         g_local_services = ServiceFlags(g_local_services | NODE_BLOOM);
@@ -1381,6 +1395,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
     }, std::chrono::minutes{5});
 
+    LogInstance().SetRateLimiting(std::make_unique<BCLog::LogRateLimiter>(
+        [&scheduler](auto func, auto window) { scheduler.scheduleEvery(std::move(func), window); },
+        BCLog::RATELIMIT_MAX_BYTES,
+        1h));
+
     assert(!node.validation_signals);
     node.validation_signals = std::make_unique<ValidationSignals>(std::make_unique<SerialTaskRunner>(scheduler));
     auto& validation_signals = *node.validation_signals;
@@ -1704,6 +1723,12 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (args.GetBoolArg("-txindex", DEFAULT_TXINDEX)) {
         LogInfo("* Using %.1f MiB for transaction index database", index_cache_sizes.tx_index * (1.0 / 1024 / 1024));
     }
+    if (args.GetBoolArg("-bip352index", DEFAULT_BIP352_INDEX)) {
+        LogPrintf("* Using %.1f MiB for BIP352 index database\n", index_cache_sizes.bip352_index * (1.0 / 1024 / 1024));
+    }
+    if (args.GetBoolArg("-bip352ctindex", DEFAULT_BIP352_CT_INDEX)) {
+        LogPrintf("* Using %.1f MiB for BIP352 cut-through index database\n", index_cache_sizes.bip352_ct_index * (1.0 / 1024 / 1024));
+    }
     for (BlockFilterType filter_type : g_enabled_filter_types) {
         LogInfo("* Using %.1f MiB for %s block filter index database",
                   index_cache_sizes.filter_index * (1.0 / 1024 / 1024), BlockFilterTypeName(filter_type));
@@ -1783,6 +1808,15 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (args.GetBoolArg("-locationsindex", DEFAULT_LOCATIONSINDEX)) {
         g_locations_index = std::make_unique<LocationsIndex>(interfaces::MakeChain(node), /*cache_size=*/0, false, do_reindex);
         node.indexes.emplace_back(g_locations_index.get());
+    }
+
+    if (args.GetBoolArg("-bip352index", DEFAULT_BIP352_INDEX)) {
+        g_bip352_index = std::make_unique<BIP352Index>(/*cut_through=*/false, interfaces::MakeChain(node), index_cache_sizes.bip352_index, false, do_reindex);
+        node.indexes.emplace_back(g_bip352_index.get());
+    }
+    if (args.GetBoolArg("-bip352ctindex", DEFAULT_BIP352_CT_INDEX)) {
+        g_bip352_ct_index = std::make_unique<BIP352Index>(/*cut_through=*/true, interfaces::MakeChain(node), index_cache_sizes.bip352_ct_index, false, do_reindex);
+        node.indexes.emplace_back(g_bip352_ct_index.get());
     }
 
     // Init indexes

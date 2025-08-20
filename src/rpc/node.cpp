@@ -11,6 +11,7 @@
 #include <index/coinstatsindex.h>
 #include <index/locationsindex.h>
 #include <index/txindex.h>
+#include <index/bip352.h>
 #include <interfaces/chain.h>
 #include <interfaces/echo.h>
 #include <interfaces/init.h>
@@ -394,6 +395,14 @@ static RPCHelpMan getindexinfo()
 
     if (g_coin_stats_index) {
         result.pushKVs(SummaryToJSON(g_coin_stats_index->GetSummary(), index_name));
+    }
+
+    if (g_bip352_index) {
+        result.pushKVs(SummaryToJSON(g_bip352_index->GetSummary(), index_name));
+    }
+
+    if (g_bip352_ct_index) {
+        result.pushKVs(SummaryToJSON(g_bip352_ct_index->GetSummary(), index_name));
     }
 
     ForEachBlockFilterIndex([&result, &index_name](const BlockFilterIndex& index) {

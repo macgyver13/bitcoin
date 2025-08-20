@@ -18,6 +18,7 @@ add_executable(test_bitcoin
   bech32_tests.cpp
   bip32_tests.cpp
   bip324_tests.cpp
+  bip352_tests.cpp
   blockchain_tests.cpp
   blockencodings_tests.cpp
   blockfilter_index_tests.cpp
@@ -107,6 +108,7 @@ add_executable(test_bitcoin
   transaction_tests.cpp
   translation_tests.cpp
   txdownload_tests.cpp
+  txgraph_tests.cpp
   txindex_tests.cpp
   txpackage_tests.cpp
   txreconciliation_tests.cpp
@@ -131,6 +133,7 @@ include(TargetDataSources)
 target_json_data_sources(test_bitcoin
   data/base58_encode_decode.json
   data/bip341_wallet_vectors.json
+  data/bip352_send_and_receive_vectors.json
   data/blockfilters.json
   data/key_io_invalid.json
   data/key_io_valid.json
@@ -183,21 +186,20 @@ function(add_boost_test source_file)
 
   file(READ "${source_file}" source_file_content)
   string(REGEX
-    MATCH "(BOOST_FIXTURE_TEST_SUITE|BOOST_AUTO_TEST_SUITE)\\(([A-Za-z0-9_]+)"
+    MATCHALL "(BOOST_FIXTURE_TEST_SUITE|BOOST_AUTO_TEST_SUITE)\\(([A-Za-z0-9_]+)"
     test_suite_macro "${source_file_content}"
   )
-  string(REGEX
+  list(TRANSFORM test_suite_macro
     REPLACE "(BOOST_FIXTURE_TEST_SUITE|BOOST_AUTO_TEST_SUITE)\\(" ""
-    test_suite_name "${test_suite_macro}"
   )
-  if(test_suite_name)
+  foreach(test_suite_name IN LISTS test_suite_macro)
     add_test(NAME ${test_suite_name}
       COMMAND test_bitcoin --run_test=${test_suite_name} --catch_system_error=no --log_level=test_suite -- DEBUG_LOG_OUT
     )
     set_property(TEST ${test_suite_name} PROPERTY
       SKIP_REGULAR_EXPRESSION "no test cases matching filter"
     )
-  endif()
+  endforeach()
 endfunction()
 
 function(add_all_test_targets)

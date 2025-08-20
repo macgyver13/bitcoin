@@ -140,6 +140,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   coins.cpp
   common/args.cpp
   common/bloom.cpp
+  common/bip352.cpp
   common/config.cpp
   common/init.cpp
   common/interfaces.cpp
@@ -236,6 +237,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   httpserver.cpp
   i2p.cpp
   index/base.cpp
+  index/bip352.cpp
   index/blockfilterindex.cpp
   index/coinstatsindex.cpp
   index/locationsindex.cpp
@@ -278,6 +280,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/timeoffsets.cpp
   node/transaction.cpp
   node/txdownloadman_impl.cpp
+  node/txorphanage.cpp
   node/txreconciliation.cpp
   node/utxo_snapshot.cpp
   node/warnings.cpp
@@ -309,7 +312,6 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   txdb.cpp
   txgraph.cpp
   txmempool.cpp
-  txorphanage.cpp
   txrequest.cpp
   validation.cpp
   validationinterface.cpp
@@ -325,6 +327,7 @@ target_link_libraries(bitcoin_node
     $<TARGET_NAME_IF_EXISTS:bitcoin_zmq>
     leveldb
     minisketch
+    secp256k1
     univalue
     Boost::headers
     $<TARGET_NAME_IF_EXISTS:libevent::core>

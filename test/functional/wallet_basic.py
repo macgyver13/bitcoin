@@ -453,14 +453,14 @@ class WalletTest(BitcoinTestFramework):
         #   - True: unicode escaped as \u....
         #   - False: unicode directly as UTF-8
         for mode in [True, False]:
-            self.nodes[0].rpc.ensure_ascii = mode
+            self.nodes[0]._rpc.ensure_ascii = mode
             # unicode check: Basic Multilingual Plane, Supplementary Plane respectively
             for label in [u'рыба', u'𝅘𝅥𝅯']:
                 addr = self.nodes[0].getnewaddress()
                 self.nodes[0].setlabel(addr, label)
                 test_address(self.nodes[0], addr, labels=[label])
                 assert label in self.nodes[0].listlabels()
-        self.nodes[0].rpc.ensure_ascii = True  # restore to default
+        self.nodes[0]._rpc.ensure_ascii = True  # restore to default
 
         # -reindex tests
         chainlimit = 6
@@ -532,7 +532,6 @@ class WalletTest(BitcoinTestFramework):
         assert_equal(address_info['address'], "mneYUmWYsuk7kySiURxCi3AGxrAqZxLgPZ")
         assert_equal(address_info["scriptPubKey"], "76a9144e3854046c7bd1594ac904e4793b6a45b36dea0988ac")
         assert not address_info["ismine"]
-        assert not address_info["iswatchonly"]
         assert not address_info["isscript"]
         assert not address_info["ischange"]
 
