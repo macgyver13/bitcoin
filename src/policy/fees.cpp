@@ -519,16 +519,16 @@ void TxConfirmStats::removeTx(unsigned int entryHeight, unsigned int nBestSeenHe
     }
 }
 
-bool CBlockPolicyEstimator::removeTx(uint256 hash)
+bool CBlockPolicyEstimator::removeTx(Txid hash)
 {
     LOCK(m_cs_fee_estimator);
     return _removeTx(hash, /*inBlock=*/false);
 }
 
-bool CBlockPolicyEstimator::_removeTx(const uint256& hash, bool inBlock)
+bool CBlockPolicyEstimator::_removeTx(const Txid& hash, bool inBlock)
 {
     AssertLockHeld(m_cs_fee_estimator);
-    std::map<uint256, TxStatsInfo>::iterator pos = mapMemPoolTxs.find(hash);
+    std::map<Txid, TxStatsInfo>::iterator pos = mapMemPoolTxs.find(hash);
     if (pos != mapMemPoolTxs.end()) {
         feeStats->removeTx(pos->second.blockHeight, nBestSeenHeight, pos->second.bucketIndex, inBlock);
         shortStats->removeTx(pos->second.blockHeight, nBestSeenHeight, pos->second.bucketIndex, inBlock);
@@ -561,7 +561,7 @@ CBlockPolicyEstimator::CBlockPolicyEstimator(const fs::path& estimation_filepath
     AutoFile est_file{fsbridge::fopen(m_estimation_filepath, "rb")};
 
     if (est_file.IsNull()) {
-        LogPrintf("%s is not found. Continue anyway.\n", fs::PathToString(m_estimation_filepath));
+        LogInfo("%s is not found. Continue anyway.", fs::PathToString(m_estimation_filepath));
         return;
     }
 
@@ -971,7 +971,7 @@ void CBlockPolicyEstimator::FlushFeeEstimates()
         LogError("Failed to close fee estimates file %s: %s. Continuing anyway.", fs::PathToString(m_estimation_filepath), SysErrorString(errno));
         return;
     }
-    LogPrintf("Flushed fee estimates to %s.\n", fs::PathToString(m_estimation_filepath.filename()));
+    LogInfo("Flushed fee estimates to %s.", fs::PathToString(m_estimation_filepath.filename()));
 }
 
 bool CBlockPolicyEstimator::Write(AutoFile& fileout) const

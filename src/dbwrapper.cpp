@@ -228,12 +228,12 @@ CDBWrapper::CDBWrapper(const DBParams& params)
         DBContext().options.env = DBContext().penv;
     } else {
         if (params.wipe_data) {
-            LogPrintf("Wiping LevelDB in %s\n", fs::PathToString(params.path));
+            LogInfo("Wiping LevelDB in %s", fs::PathToString(params.path));
             leveldb::Status result = leveldb::DestroyDB(fs::PathToString(params.path), DBContext().options);
             HandleError(result);
         }
         TryCreateDirectories(params.path);
-        LogPrintf("Opening LevelDB in %s\n", fs::PathToString(params.path));
+        LogInfo("Opening LevelDB in %s", fs::PathToString(params.path));
     }
     // PathToString() return value is safe to pass to leveldb open function,
     // because on POSIX leveldb passes the byte string directly to ::open(), and
@@ -241,19 +241,20 @@ CDBWrapper::CDBWrapper(const DBParams& params)
     // (see env_posix.cc and env_windows.cc).
     leveldb::Status status = leveldb::DB::Open(DBContext().options, fs::PathToString(params.path), &DBContext().pdb);
     HandleError(status);
-    LogPrintf("Opened LevelDB successfully\n");
+    LogInfo("Opened LevelDB successfully");
 
     if (params.options.force_compact) {
-        LogPrintf("Starting database compaction of %s\n", fs::PathToString(params.path));
+        LogInfo("Starting database compaction of %s", fs::PathToString(params.path));
         DBContext().pdb->CompactRange(nullptr, nullptr);
-        LogPrintf("Finished database compaction of %s\n", fs::PathToString(params.path));
+        LogInfo("Finished database compaction of %s", fs::PathToString(params.path));
     }
 
-    assert(!m_obfuscation); // Needed for unobfuscated Read()/Write() below
-    if (!Read(OBFUSCATION_KEY_KEY, m_obfuscation) && params.obfuscate && IsEmpty()) {
-        // Generate, write and read back the new obfuscation key, making sure we don't obfuscate the key itself
-        Write(OBFUSCATION_KEY_KEY, FastRandomContext{}.randbytes(Obfuscation::KEY_SIZE));
-        Read(OBFUSCATION_KEY_KEY, m_obfuscation);
+    if (!Read(OBFUSCATION_KEY, m_obfuscation) && params.obfuscate && IsEmpty()) {
+        // Generate and write the new obfuscation key.
+        const Obfuscation obfuscation{FastRandomContext{}.randbytes<Obfuscation::KEY_SIZE>()};
+        assert(!m_obfuscation); // Make sure the key is written without obfuscation.
+        Write(OBFUSCATION_KEY, obfuscation);
+        m_obfuscation = obfuscation;
         LogInfo("Wrote new obfuscation key for %s: %s", fs::PathToString(params.path), m_obfuscation.HexKey());
     }
     LogInfo("Using obfuscation key for %s: %s", fs::PathToString(params.path), m_obfuscation.HexKey());

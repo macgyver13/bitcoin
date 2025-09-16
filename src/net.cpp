@@ -266,6 +266,12 @@ std::optional<CService> GetLocalAddrForPeer(CNode& node)
     return std::nullopt;
 }
 
+void ClearLocal()
+{
+    LOCK(g_maplocalhost_mutex);
+    return mapLocalHost.clear();
+}
+
 // learn a new local address
 bool AddLocal(const CService& addr_, int nScore)
 {
@@ -3496,7 +3502,7 @@ CConnman::~CConnman()
     Stop();
 }
 
-std::vector<CAddress> CConnman::GetAddresses(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
+std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     std::vector<CAddress> addresses = addrman.GetAddr(max_addresses, max_pct, network, filtered);
     if (m_banman) {
@@ -3521,7 +3527,7 @@ std::vector<CAddress> CConnman::GetAddresses(CNode& requestor, size_t max_addres
     auto r = m_addr_response_caches.emplace(cache_id, CachedAddrResponse{});
     CachedAddrResponse& cache_entry = r.first->second;
     if (cache_entry.m_cache_entry_expiration < current_time) { // If emplace() added new one it has expiration 0.
-        cache_entry.m_addrs_response_cache = GetAddresses(max_addresses, max_pct, /*network=*/std::nullopt);
+        cache_entry.m_addrs_response_cache = GetAddressesUnsafe(max_addresses, max_pct, /*network=*/std::nullopt);
         // Choosing a proper cache lifetime is a trade-off between the privacy leak minimization
         // and the usefulness of ADDR responses to honest users.
         //
@@ -3964,8 +3970,8 @@ void CConnman::PerformReconnections()
 
 void CConnman::ASMapHealthCheck()
 {
-    const std::vector<CAddress> v4_addrs{GetAddresses(/*max_addresses=*/ 0, /*max_pct=*/ 0, Network::NET_IPV4, /*filtered=*/ false)};
-    const std::vector<CAddress> v6_addrs{GetAddresses(/*max_addresses=*/ 0, /*max_pct=*/ 0, Network::NET_IPV6, /*filtered=*/ false)};
+    const std::vector<CAddress> v4_addrs{GetAddressesUnsafe(/*max_addresses=*/0, /*max_pct=*/0, Network::NET_IPV4, /*filtered=*/false)};
+    const std::vector<CAddress> v6_addrs{GetAddressesUnsafe(/*max_addresses=*/0, /*max_pct=*/0, Network::NET_IPV6, /*filtered=*/false)};
     std::vector<CNetAddr> clearnet_addrs;
     clearnet_addrs.reserve(v4_addrs.size() + v6_addrs.size());
     std::transform(v4_addrs.begin(), v4_addrs.end(), std::back_inserter(clearnet_addrs),

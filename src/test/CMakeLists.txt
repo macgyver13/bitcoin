@@ -65,7 +65,9 @@ add_executable(test_bitcoin
   net_peer_eviction_tests.cpp
   net_tests.cpp
   netbase_tests.cpp
+  node_init_tests.cpp
   node_warnings_tests.cpp
+  locationsindex_tests.cpp
   orphanage_tests.cpp
   pcp_tests.cpp
   peerman_tests.cpp
@@ -84,6 +86,7 @@ add_executable(test_bitcoin
   rpc_tests.cpp
   sanity_tests.cpp
   scheduler_tests.cpp
+  script_assets_tests.cpp
   script_p2sh_tests.cpp
   script_parse_tests.cpp
   script_segwit_tests.cpp
@@ -196,7 +199,7 @@ function(add_boost_test source_file)
       COMMAND test_bitcoin --run_test=${test_suite_name} --catch_system_error=no --log_level=test_suite -- DEBUG_LOG_OUT
     )
     set_property(TEST ${test_suite_name} PROPERTY
-      SKIP_REGULAR_EXPRESSION "no test cases matching filter"
+      SKIP_REGULAR_EXPRESSION "no test cases matching filter" "skipping script_assets_test"
     )
   endforeach()
 endfunction()
@@ -215,4 +218,4 @@ endfunction()
 
 add_all_test_targets()
 
-install_binary_component(test_bitcoin)
+install_binary_component(test_bitcoin INTERNAL)
