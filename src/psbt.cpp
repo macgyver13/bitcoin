@@ -34,6 +34,23 @@ PartiallySignedTransaction::PartiallySignedTransaction(const CMutableTransaction
     }
 }
 
+/**
+ * Merge silent payment ECDH shares and DLEQ proofs (BIP375) from another map into this one.
+ * A Combiner must not silently pick a winner when two parties claim different values for the
+ * same scan key, so a conflict fails the merge.
+ */
+template <typename V>
+static bool MergeSilentPaymentsMap(std::map<CPubKey, V>& dest, const std::map<CPubKey, V>& src)
+{
+    for (const auto& [scan_key, value] : src) {
+        const auto& [it, inserted] = dest.emplace(scan_key, value);
+        if (!inserted && it->second != value) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool PartiallySignedTransaction::Merge(const PartiallySignedTransaction& psbt)
 {
     // Prohibited to merge two PSBTs over different transactions
@@ -72,6 +89,9 @@ bool PartiallySignedTransaction::Merge(const PartiallySignedTransaction& psbt)
     }
 
     m_proprietary.insert(psbt.m_proprietary.begin(), psbt.m_proprietary.end());
+    if (!MergeSilentPaymentsMap(m_sp_ecdh_shares, psbt.m_sp_ecdh_shares)) return false;
+    if (!MergeSilentPaymentsMap(m_sp_dleq_proofs, psbt.m_sp_dleq_proofs)) return false;
+
     unknown.insert(psbt.unknown.begin(), psbt.unknown.end());
 
     return true;
@@ -467,6 +487,8 @@ bool PSBTInput::Merge(const PSBTInput& input)
     if (sequence == std::nullopt && input.sequence != std::nullopt) sequence = input.sequence;
     if (time_locktime == std::nullopt && input.time_locktime != std::nullopt) time_locktime = input.time_locktime;
     if (height_locktime == std::nullopt && input.height_locktime != std::nullopt) height_locktime = input.height_locktime;
+    if (!MergeSilentPaymentsMap(m_sp_ecdh_shares, input.m_sp_ecdh_shares)) return false;
+    if (!MergeSilentPaymentsMap(m_sp_dleq_proofs, input.m_sp_dleq_proofs)) return false;
 
     return true;
 }
@@ -547,6 +569,15 @@ bool PSBTOutput::Merge(const PSBTOutput& output)
     if (m_tap_internal_key.IsNull() && !output.m_tap_internal_key.IsNull()) m_tap_internal_key = output.m_tap_internal_key;
     if (m_tap_tree.empty() && !output.m_tap_tree.empty()) m_tap_tree = output.m_tap_tree;
     m_musig2_participants.insert(output.m_musig2_participants.begin(), output.m_musig2_participants.end());
+
+    if (output.m_sp_v0_info.has_value()) {
+        if (m_sp_v0_info.has_value() && *m_sp_v0_info != *output.m_sp_v0_info) return false;
+        m_sp_v0_info = output.m_sp_v0_info;
+    }
+    if (output.m_sp_v0_label.has_value()) {
+        if (m_sp_v0_label.has_value() && *m_sp_v0_label != *output.m_sp_v0_label) return false;
+        m_sp_v0_label = output.m_sp_v0_label;
+    }
 
     return true;
 }

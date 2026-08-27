@@ -40,6 +40,8 @@ inline constexpr uint8_t PSBT_GLOBAL_FALLBACK_LOCKTIME = 0x03;
 inline constexpr uint8_t PSBT_GLOBAL_INPUT_COUNT = 0x04;
 inline constexpr uint8_t PSBT_GLOBAL_OUTPUT_COUNT = 0x05;
 inline constexpr uint8_t PSBT_GLOBAL_TX_MODIFIABLE = 0x06;
+inline constexpr uint8_t PSBT_GLOBAL_SP_ECDH_SHARE = 0x07;
+inline constexpr uint8_t PSBT_GLOBAL_SP_DLEQ = 0x08;
 inline constexpr uint8_t PSBT_GLOBAL_VERSION = 0xFB;
 inline constexpr uint8_t PSBT_GLOBAL_PROPRIETARY = 0xFC;
 
@@ -71,6 +73,8 @@ inline constexpr uint8_t PSBT_IN_TAP_MERKLE_ROOT = 0x18;
 inline constexpr uint8_t PSBT_IN_MUSIG2_PARTICIPANT_PUBKEYS = 0x1a;
 inline constexpr uint8_t PSBT_IN_MUSIG2_PUB_NONCE = 0x1b;
 inline constexpr uint8_t PSBT_IN_MUSIG2_PARTIAL_SIG = 0x1c;
+inline constexpr uint8_t PSBT_IN_SP_ECDH_SHARE = 0x1d;
+inline constexpr uint8_t PSBT_IN_SP_DLEQ = 0x1e;
 inline constexpr uint8_t PSBT_IN_PROPRIETARY = 0xFC;
 
 // Output types
@@ -83,6 +87,8 @@ inline constexpr uint8_t PSBT_OUT_TAP_INTERNAL_KEY = 0x05;
 inline constexpr uint8_t PSBT_OUT_TAP_TREE = 0x06;
 inline constexpr uint8_t PSBT_OUT_TAP_BIP32_DERIVATION = 0x07;
 inline constexpr uint8_t PSBT_OUT_MUSIG2_PARTICIPANT_PUBKEYS = 0x08;
+inline constexpr uint8_t PSBT_OUT_SP_V0_INFO = 0x09;
+inline constexpr uint8_t PSBT_OUT_SP_V0_LABEL = 0x0a;
 inline constexpr uint8_t PSBT_OUT_PROPRIETARY = 0xFC;
 
 // The separator is 0x00. Reading this in means that the unserializer can interpret it
@@ -271,6 +277,71 @@ void DeserializeMuSig2ParticipantDataIdentifier(Stream& skey, CPubKey& agg_pub, 
     }
 }
 
+// Size of a BIP374 DLEQ proof as carried by the BIP375 PSBT_{GLOBAL,IN}_SP_DLEQ fields
+inline constexpr size_t SP_DLEQ_PROOF_SIZE{64};
+
+// Read the 33-byte silent payments scan key that is the keydata of every BIP375
+// PSBT_{GLOBAL,IN}_SP_{ECDH_SHARE,DLEQ} field
+inline CPubKey DeserializeSilentPaymentsScanKey(SpanReader& skey, const std::string& context)
+{
+    std::array<unsigned char, CPubKey::COMPRESSED_SIZE> scan_key_bytes;
+    skey >> std::as_writable_bytes(std::span{scan_key_bytes});
+    CPubKey scan_key(scan_key_bytes);
+    if (!scan_key.IsFullyValid()) {
+        throw std::ios_base::failure(context + " silent payments scan key is invalid");
+    }
+    return scan_key;
+}
+
+// Deserialize a PSBT_{GLOBAL,IN}_SP_ECDH_SHARE field
+template<typename Stream>
+void DeserializeSilentPaymentsECDHShare(Stream& s, SpanReader& skey, std::map<CPubKey, CPubKey>& out, const std::string& context)
+{
+    const CPubKey scan_key{DeserializeSilentPaymentsScanKey(skey, context)};
+
+    std::vector<unsigned char> val;
+    s >> val;
+    if (val.size() != CPubKey::COMPRESSED_SIZE) {
+        throw std::ios_base::failure(context + " silent payments ECDH share value is not 33 bytes");
+    }
+    CPubKey share{val};
+    if (!share.IsFullyValid()) {
+        throw std::ios_base::failure(context + " silent payments ECDH share is invalid");
+    }
+
+    out.emplace(scan_key, share);
+}
+
+// Deserialize a PSBT_{GLOBAL,IN}_SP_DLEQ field. The proof is stored and length checked,
+// but not verified; verification requires the BIP374 primitive.
+template<typename Stream>
+void DeserializeSilentPaymentsDLEQProof(Stream& s, SpanReader& skey, std::map<CPubKey, std::vector<uint8_t>>& out, const std::string& context)
+{
+    const CPubKey scan_key{DeserializeSilentPaymentsScanKey(skey, context)};
+
+    std::vector<uint8_t> proof;
+    s >> proof;
+    if (proof.size() != SP_DLEQ_PROOF_SIZE) {
+        throw std::ios_base::failure(context + " silent payments DLEQ proof value is not 64 bytes");
+    }
+
+    out.emplace(scan_key, std::move(proof));
+}
+
+// Serialize the PSBT_{GLOBAL,IN}_SP_ECDH_SHARE and PSBT_{GLOBAL,IN}_SP_DLEQ fields
+template<typename Stream>
+void SerializeSilentPaymentsShares(Stream& s, const std::map<CPubKey, CPubKey>& shares, const std::map<CPubKey, std::vector<uint8_t>>& proofs, CompactSizeWriter share_type, CompactSizeWriter dleq_type)
+{
+    for (const auto& [scan_key, share] : shares) {
+        SerializeToVector(s, share_type, std::span{scan_key});
+        SerializeToVector(s, std::span{share});
+    }
+    for (const auto& [scan_key, proof] : proofs) {
+        SerializeToVector(s, dleq_type, std::span{scan_key});
+        s << proof;
+    }
+}
+
 static inline void ExpectedKeySize(const std::string& key_name, const std::vector<unsigned char>& key, uint64_t expected_size) {
     if (key.size() != expected_size) {
         throw std::ios_base::failure(tfm::format("Size of key was not %d for the type %s", expected_size, key_name));
@@ -317,6 +388,12 @@ public:
     std::map<std::pair<CPubKey, uint256>, std::map<CPubKey, std::vector<uint8_t>>> m_musig2_pubnonces;
     // Key is the aggregate pubkey and the script leaf hash, value is a map of participant pubkey to partial_sig
     std::map<std::pair<CPubKey, uint256>, std::map<CPubKey, uint256>> m_musig2_partial_sigs;
+
+    // Silent payments fields (BIP375). Keyed by the recipient's scan key.
+    // Shares are a*B_scan, without input_hash; input_hash is applied when the
+    // output scripts are computed. DLEQ proofs are stored but not verified here.
+    std::map<CPubKey, CPubKey> m_sp_ecdh_shares;
+    std::map<CPubKey, std::vector<uint8_t>> m_sp_dleq_proofs;
 
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
@@ -502,6 +579,11 @@ public:
                     }
                     SerializeToVector(s, psig);
                 }
+            }
+
+            // Write silent payments ECDH shares and DLEQ proofs
+            if (m_psbt_version >= 2) {
+                SerializeSilentPaymentsShares(s, m_sp_ecdh_shares, m_sp_dleq_proofs, CompactSizeWriter(PSBT_IN_SP_ECDH_SHARE), CompactSizeWriter(PSBT_IN_SP_DLEQ));
             }
         }
 
@@ -897,6 +979,24 @@ public:
                     m_musig2_partial_sigs[std::make_pair(agg_pub, leaf_hash)].emplace(part_pub, partial_sig);
                     break;
                 }
+                case PSBT_IN_SP_ECDH_SHARE:
+                {
+                    ExpectedKeySize("Input Silent Payments ECDH Share", key, CPubKey::COMPRESSED_SIZE + 1);
+                    if (m_psbt_version < 2) {
+                        throw std::ios_base::failure("Input silent payments ECDH share is not allowed in PSBTv0");
+                    }
+                    DeserializeSilentPaymentsECDHShare(s, skey, m_sp_ecdh_shares, std::string{"Input"});
+                    break;
+                }
+                case PSBT_IN_SP_DLEQ:
+                {
+                    ExpectedKeySize("Input Silent Payments DLEQ Proof", key, CPubKey::COMPRESSED_SIZE + 1);
+                    if (m_psbt_version < 2) {
+                        throw std::ios_base::failure("Input silent payments DLEQ proof is not allowed in PSBTv0");
+                    }
+                    DeserializeSilentPaymentsDLEQProof(s, skey, m_sp_dleq_proofs, std::string{"Input"});
+                    break;
+                }
                 case PSBT_IN_PROPRIETARY:
                 {
                     PSBTProprietary this_prop;
@@ -949,6 +1049,11 @@ public:
     std::vector<std::tuple<uint8_t, uint8_t, std::vector<unsigned char>>> m_tap_tree;
     std::map<XOnlyPubKey, std::pair<std::set<uint256>, KeyOriginInfo>> m_tap_bip32_paths;
     std::map<CPubKey, std::vector<CPubKey>> m_musig2_participants;
+
+    // Silent payments fields (BIP375): the recipient's scan and spend keys, and
+    // the label used to derive the spend key when this output is change.
+    std::optional<std::pair<CPubKey, CPubKey>> m_sp_v0_info;
+    std::optional<uint32_t> m_sp_v0_label;
 
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
@@ -1051,6 +1156,17 @@ public:
                 s_value << std::span{pk};
             }
             s << value;
+        }
+
+        // Write silent payments data and label
+        if (m_psbt_version >= 2 && m_sp_v0_info.has_value()) {
+            const auto& [scan_key, spend_key] = *m_sp_v0_info;
+            SerializeToVector(s, CompactSizeWriter(PSBT_OUT_SP_V0_INFO));
+            SerializeToVector(s, std::span{scan_key}, std::span{spend_key});
+        }
+        if (m_psbt_version >= 2 && m_sp_v0_label.has_value()) {
+            SerializeToVector(s, CompactSizeWriter(PSBT_OUT_SP_V0_LABEL));
+            SerializeToVector(s, *m_sp_v0_label);
         }
 
         // Write unknown things
@@ -1196,6 +1312,39 @@ public:
                     DeserializeMuSig2ParticipantPubkeys(s, skey, m_musig2_participants, std::string{"Output"});
                     break;
                 }
+                case PSBT_OUT_SP_V0_INFO:
+                {
+                    ExpectedKeySize("Output Silent Payments Data", key, 1);
+                    if (m_psbt_version < 2) {
+                        throw std::ios_base::failure("Output silent payments data is not allowed in PSBTv0");
+                    }
+                    std::vector<unsigned char> val;
+                    s >> val;
+                    if (val.size() != 2 * CPubKey::COMPRESSED_SIZE) {
+                        throw std::ios_base::failure("Output silent payments data value is not 66 bytes");
+                    }
+                    CPubKey scan_key{std::span{val}.first(CPubKey::COMPRESSED_SIZE)};
+                    CPubKey spend_key{std::span{val}.last(CPubKey::COMPRESSED_SIZE)};
+                    if (!scan_key.IsFullyValid()) {
+                        throw std::ios_base::failure("Output silent payments scan key is invalid");
+                    }
+                    if (!spend_key.IsFullyValid()) {
+                        throw std::ios_base::failure("Output silent payments spend key is invalid");
+                    }
+                    m_sp_v0_info.emplace(scan_key, spend_key);
+                    break;
+                }
+                case PSBT_OUT_SP_V0_LABEL:
+                {
+                    ExpectedKeySize("Output Silent Payments Label", key, 1);
+                    if (m_psbt_version < 2) {
+                        throw std::ios_base::failure("Output silent payments label is not allowed in PSBTv0");
+                    }
+                    uint32_t label;
+                    UnserializeFromVector(s, label);
+                    m_sp_v0_label = label;
+                    break;
+                }
                 case PSBT_OUT_PROPRIETARY:
                 {
                     PSBTProprietary this_prop;
@@ -1231,6 +1380,11 @@ public:
                 throw std::ios_base::failure("Output script is required in PSBTv2");
             }
         }
+
+        // BIP375: the label only has meaning alongside the silent payments data
+        if (m_sp_v0_label.has_value() && !m_sp_v0_info.has_value()) {
+            throw std::ios_base::failure("Output silent payments label requires silent payments data");
+        }
     }
 };
 
@@ -1247,6 +1401,12 @@ public:
     std::optional<std::bitset<8>> m_tx_modifiable;
     std::vector<PSBTInput> inputs;
     std::vector<PSBTOutput> outputs;
+
+    // Silent payments fields (BIP375). Keyed by the recipient's scan key. A global
+    // share is a_n*B_scan, the sum over all eligible inputs, without input_hash.
+    // DLEQ proofs are stored but not verified here.
+    std::map<CPubKey, CPubKey> m_sp_ecdh_shares;
+    std::map<CPubKey, std::vector<uint8_t>> m_sp_dleq_proofs;
     std::map<std::vector<unsigned char>, std::vector<unsigned char>> unknown;
     std::set<PSBTProprietary> m_proprietary;
 
@@ -1312,6 +1472,9 @@ public:
                 SerializeToVector(s, CompactSizeWriter(PSBT_GLOBAL_TX_MODIFIABLE));
                 SerializeToVector(s, static_cast<uint8_t>(m_tx_modifiable->to_ulong()));
             }
+
+            // Write silent payments ECDH shares and DLEQ proofs
+            SerializeSilentPaymentsShares(s, m_sp_ecdh_shares, m_sp_dleq_proofs, CompactSizeWriter(PSBT_GLOBAL_SP_ECDH_SHARE), CompactSizeWriter(PSBT_GLOBAL_SP_DLEQ));
         }
 
         // PSBT version
@@ -1451,6 +1614,20 @@ public:
                     m_tx_modifiable.emplace(tx_mod);
                     break;
                 }
+                case PSBT_GLOBAL_SP_ECDH_SHARE:
+                {
+                    // The PSBT version is not necessarily known yet, so the PSBTv2-only
+                    // check happens after the global map has been read.
+                    ExpectedKeySize("Global Silent Payments ECDH Share", key, CPubKey::COMPRESSED_SIZE + 1);
+                    DeserializeSilentPaymentsECDHShare(s, skey, m_sp_ecdh_shares, std::string{"Global"});
+                    break;
+                }
+                case PSBT_GLOBAL_SP_DLEQ:
+                {
+                    ExpectedKeySize("Global Silent Payments DLEQ Proof", key, CPubKey::COMPRESSED_SIZE + 1);
+                    DeserializeSilentPaymentsDLEQProof(s, skey, m_sp_dleq_proofs, std::string{"Global"});
+                    break;
+                }
                 case PSBT_GLOBAL_XPUB:
                 {
                     ExpectedKeySize("Global XPUB", key, BIP32_EXTKEY_WITH_VERSION_SIZE + 1);
@@ -1535,6 +1712,12 @@ public:
             if (m_tx_modifiable != std::nullopt) {
                 throw std::ios_base::failure("PSBT_GLOBAL_TX_MODIFIABLE is not allowed in PSBTv0");
             }
+            if (!m_sp_ecdh_shares.empty()) {
+                throw std::ios_base::failure("PSBT_GLOBAL_SP_ECDH_SHARE is not allowed in PSBTv0");
+            }
+            if (!m_sp_dleq_proofs.empty()) {
+                throw std::ios_base::failure("PSBT_GLOBAL_SP_DLEQ is not allowed in PSBTv0");
+            }
         }
         // Disallow v1
         if (psbt_ver == 1) {
@@ -1610,6 +1793,17 @@ public:
         // Make sure that the number of outputs matches the number of outputs in the transaction
         if (outputs.size() != output_count) {
             throw std::ios_base::failure("Outputs provided does not match the number of outputs in transaction.");
+        }
+
+        // BIP375: a Signer that computes the output script of a silent payment output must
+        // clear the Inputs Modifiable and Outputs Modifiable flags, since adding or removing
+        // an input or output would invalidate the script it just computed.
+        if (m_tx_modifiable.has_value() && (m_tx_modifiable->test(0) || m_tx_modifiable->test(1))) {
+            for (const PSBTOutput& output : outputs) {
+                if (output.m_sp_v0_info.has_value() && !output.script.empty()) {
+                    throw std::ios_base::failure("PSBT_GLOBAL_TX_MODIFIABLE must not allow modifying inputs or outputs once a silent payment output script has been computed");
+                }
+            }
         }
     }
 
