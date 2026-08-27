@@ -54,6 +54,31 @@ using node::PSBTAnalysis;
 
 static constexpr decltype(CTransaction::version) DEFAULT_RAWTX_VERSION{CTransaction::CURRENT_VERSION};
 
+/** Render the BIP375 silent payment ECDH shares and DLEQ proofs of a global, input, or output map */
+static void SilentPaymentsSharesToUniv(const std::map<CPubKey, CPubKey>& shares, const std::map<CPubKey, std::vector<uint8_t>>& proofs, UniValue& out)
+{
+    if (!shares.empty()) {
+        UniValue sp_shares(UniValue::VARR);
+        for (const auto& [scan_key, share] : shares) {
+            UniValue info(UniValue::VOBJ);
+            info.pushKV("scan_key", HexStr(scan_key));
+            info.pushKV("share", HexStr(share));
+            sp_shares.push_back(std::move(info));
+        }
+        out.pushKV("sp_ecdh_shares", std::move(sp_shares));
+    }
+    if (!proofs.empty()) {
+        UniValue sp_proofs(UniValue::VARR);
+        for (const auto& [scan_key, proof] : proofs) {
+            UniValue info(UniValue::VOBJ);
+            info.pushKV("scan_key", HexStr(scan_key));
+            info.pushKV("proof", HexStr(proof));
+            sp_proofs.push_back(std::move(info));
+        }
+        out.pushKV("sp_dleq_proofs", std::move(sp_proofs));
+    }
+}
+
 static void TxToJSON(const CTransaction& tx, const uint256 hashBlock, UniValue& entry,
                      Chainstate& active_chainstate, const CTxUndo* txundo = nullptr,
                      TxVerbosity verbosity = TxVerbosity::SHOW_DETAILS)
@@ -928,6 +953,22 @@ const RPCResult& DecodePSBTInputs()
                         {RPCResult::Type::STR_HEX, "pubnonce", "The public nonce itself."},
                     }},
                 }},
+                {RPCResult::Type::ARR, "sp_ecdh_shares", /*optional=*/true, "The BIP375 silent payment ECDH shares for the input",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "scan_key", "The compressed scan key of the recipient this share is for."},
+                        {RPCResult::Type::STR_HEX, "share", "The compressed ECDH share itself."},
+                    }},
+                }},
+                {RPCResult::Type::ARR, "sp_dleq_proofs", /*optional=*/true, "The BIP375 silent payment DLEQ proofs for the input. These are not verified by decodepsbt.",
+                {
+                    {RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR_HEX, "scan_key", "The compressed scan key of the recipient this proof covers."},
+                        {RPCResult::Type::STR_HEX, "proof", "The 64-byte BIP374 DLEQ proof itself."},
+                    }},
+                }},
                 {RPCResult::Type::ARR, "musig2_partial_sigs", /*optional=*/true, "",
                 {
                     {RPCResult::Type::OBJ, "", "",
@@ -1028,6 +1069,8 @@ const RPCResult& DecodePSBTOutputs()
                 {
                     {RPCResult::Type::STR_HEX, "key", "(key-value pair) An unknown key-value pair"},
                 }},
+                {RPCResult::Type::STR_HEX, "sp_v0_info", /*optional=*/true, "The BIP375 silent payment scan key concatenated with the spend key of the recipient"},
+                {RPCResult::Type::NUM, "sp_v0_label", /*optional=*/true, "The BIP375 silent payment label used to derive the recipient's spend key"},
                 {RPCResult::Type::ARR, "proprietary", /*optional=*/true, "The output proprietary map",
                 {
                     {RPCResult::Type::OBJ, "", "",
@@ -1074,6 +1117,22 @@ static RPCMethod decodepsbt()
                         {RPCResult::Type::BOOL, "inputs_modifiable", /* optional */ true, "Whether inputs can be modified"},
                         {RPCResult::Type::BOOL, "outputs_modifiable", /* optional */ true, "Whether outputs can be modified"},
                         {RPCResult::Type::BOOL, "has_sighash_single", /* optional */ true, "Whether this PSBT has SIGHASH_SINGLE inputs"},
+                        {RPCResult::Type::ARR, "sp_ecdh_shares", /*optional=*/true, "The BIP375 silent payment ECDH shares for the transaction as a whole",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR_HEX, "scan_key", "The compressed scan key of the recipient this share is for."},
+                                {RPCResult::Type::STR_HEX, "share", "The compressed ECDH share itself."},
+                            }},
+                        }},
+                        {RPCResult::Type::ARR, "sp_dleq_proofs", /*optional=*/true, "The BIP375 silent payment DLEQ proofs for the transaction as a whole. These are not verified by decodepsbt.",
+                        {
+                            {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR_HEX, "scan_key", "The compressed scan key of the recipient this proof covers."},
+                                {RPCResult::Type::STR_HEX, "proof", "The 64-byte BIP374 DLEQ proof itself."},
+                            }},
+                        }},
                         {RPCResult::Type::NUM, "psbt_version", /* optional */ true, "The PSBT version number. Not to be confused with the unsigned transaction version"},
                         {RPCResult::Type::ARR, "proprietary", "The global proprietary map",
                         {
@@ -1146,6 +1205,9 @@ static RPCMethod decodepsbt()
             result.pushKV("has_sighash_single", psbtx.m_tx_modifiable->test(2));
         }
     }
+
+    // Silent payments (BIP375)
+    SilentPaymentsSharesToUniv(psbtx.m_sp_ecdh_shares, psbtx.m_sp_dleq_proofs, result);
 
     // PSBT version
     result.pushKV("psbt_version", psbtx.GetVersion());
@@ -1431,6 +1493,9 @@ static RPCMethod decodepsbt()
             in.pushKV("musig2_partial_sigs", musig_partial_sigs);
         }
 
+        // Silent payments (BIP375)
+        SilentPaymentsSharesToUniv(input.m_sp_ecdh_shares, input.m_sp_dleq_proofs, in);
+
         // Proprietary
         if (!input.m_proprietary.empty()) {
             UniValue proprietary(UniValue::VARR);
@@ -1548,6 +1613,15 @@ static RPCMethod decodepsbt()
                 musig_pubkeys.push_back(musig_part);
             }
             out.pushKV("musig2_participant_pubkeys", musig_pubkeys);
+        }
+
+        // Silent payments (BIP375)
+        if (output.m_sp_v0_info.has_value()) {
+            const auto& [scan_key, spend_key] = *output.m_sp_v0_info;
+            out.pushKV("sp_v0_info", HexStr(scan_key) + HexStr(spend_key));
+        }
+        if (output.m_sp_v0_label.has_value()) {
+            out.pushKV("sp_v0_label", static_cast<uint64_t>(*output.m_sp_v0_label));
         }
 
         // Proprietary
