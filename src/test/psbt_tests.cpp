@@ -188,6 +188,102 @@ BOOST_AUTO_TEST_CASE(psbt2_addoutput)
     BOOST_CHECK_EQUAL(psbt.outputs.size(), 2);
 }
 
+// Deterministic compressed pubkey for silent payments tests
+static CPubKey SPPubKey(uint8_t seed)
+{
+    CKey key;
+    std::array<unsigned char, 32> data{};
+    data.back() = seed;
+    key.Set(data.begin(), data.end(), /*fCompressedIn=*/true);
+    assert(key.IsValid());
+    return key.GetPubKey();
+}
+
+static std::vector<uint8_t> SPDLEQProof(uint8_t fill)
+{
+    return std::vector<uint8_t>(SP_DLEQ_PROOF_SIZE, fill);
+}
+
+/** A minimal PSBTv2 carrying every BIP375 field */
+static PartiallySignedTransaction MakeSilentPaymentPSBT()
+{
+    CMutableTransaction tx;
+    tx.vin.emplace_back(COutPoint{Txid::FromUint256(uint256::ONE), 0});
+    tx.vout.emplace_back(1000, CScript() << OP_1 << std::vector<unsigned char>(32, 0x11));
+
+    PartiallySignedTransaction psbt(tx, /*version=*/2);
+    const CPubKey scan_key{SPPubKey(1)};
+    const CPubKey spend_key{SPPubKey(2)};
+
+    psbt.m_sp_ecdh_shares.emplace(scan_key, SPPubKey(3));
+    psbt.m_sp_dleq_proofs.emplace(scan_key, SPDLEQProof(0xaa));
+    psbt.inputs[0].m_sp_ecdh_shares.emplace(scan_key, SPPubKey(4));
+    psbt.inputs[0].m_sp_dleq_proofs.emplace(scan_key, SPDLEQProof(0xbb));
+    psbt.outputs[0].m_sp_v0_info.emplace(scan_key, spend_key);
+    psbt.outputs[0].m_sp_v0_label = 7;
+
+    return psbt;
+}
+
+BOOST_AUTO_TEST_CASE(silent_payments_serialization_roundtrip)
+{
+    const PartiallySignedTransaction psbt{MakeSilentPaymentPSBT()};
+
+    DataStream ss;
+    ss << psbt;
+    util::Result<PartiallySignedTransaction> decoded = DecodeRawPSBT(ss);
+    BOOST_REQUIRE(decoded);
+    BOOST_CHECK(decoded->m_sp_ecdh_shares == psbt.m_sp_ecdh_shares);
+    BOOST_CHECK(decoded->m_sp_dleq_proofs == psbt.m_sp_dleq_proofs);
+    BOOST_CHECK(decoded->inputs[0].m_sp_ecdh_shares == psbt.inputs[0].m_sp_ecdh_shares);
+    BOOST_CHECK(decoded->inputs[0].m_sp_dleq_proofs == psbt.inputs[0].m_sp_dleq_proofs);
+    BOOST_CHECK(decoded->outputs[0].m_sp_v0_info == psbt.outputs[0].m_sp_v0_info);
+    BOOST_CHECK(decoded->outputs[0].m_sp_v0_label == psbt.outputs[0].m_sp_v0_label);
+
+    // Nothing was stashed as an unknown field
+    BOOST_CHECK(decoded->unknown.empty());
+    BOOST_CHECK(decoded->inputs[0].unknown.empty());
+    BOOST_CHECK(decoded->outputs[0].unknown.empty());
+}
+
+BOOST_AUTO_TEST_CASE(silent_payments_merge)
+{
+    const CPubKey scan_key{SPPubKey(1)};
+    const CPubKey other_scan_key{SPPubKey(5)};
+
+    // Shares and proofs for different scan keys are unioned
+    {
+        PartiallySignedTransaction left{MakeSilentPaymentPSBT()};
+        PartiallySignedTransaction right{MakeSilentPaymentPSBT()};
+        right.m_sp_ecdh_shares.emplace(other_scan_key, SPPubKey(6));
+        right.inputs[0].m_sp_ecdh_shares.emplace(other_scan_key, SPPubKey(7));
+
+        BOOST_CHECK(left.Merge(right));
+        BOOST_CHECK_EQUAL(left.m_sp_ecdh_shares.size(), 2U);
+        BOOST_CHECK_EQUAL(left.inputs[0].m_sp_ecdh_shares.size(), 2U);
+    }
+
+    // Conflicting values for the same scan key fail the merge
+    {
+        PartiallySignedTransaction left{MakeSilentPaymentPSBT()};
+        PartiallySignedTransaction right{MakeSilentPaymentPSBT()};
+        right.m_sp_ecdh_shares.at(scan_key) = SPPubKey(8);
+        BOOST_CHECK(!left.Merge(right));
+    }
+    {
+        PartiallySignedTransaction left{MakeSilentPaymentPSBT()};
+        PartiallySignedTransaction right{MakeSilentPaymentPSBT()};
+        right.inputs[0].m_sp_dleq_proofs.at(scan_key) = SPDLEQProof(0xcc);
+        BOOST_CHECK(!left.Merge(right));
+    }
+    {
+        PartiallySignedTransaction left{MakeSilentPaymentPSBT()};
+        PartiallySignedTransaction right{MakeSilentPaymentPSBT()};
+        right.outputs[0].m_sp_v0_label = 8;
+        BOOST_CHECK(!left.Merge(right));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(merge_proprietary_fields)
 {
     CMutableTransaction tx;
